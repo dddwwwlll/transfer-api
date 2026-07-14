@@ -52,7 +52,8 @@ export default {
 
       return errorResponse(404, "not_found", `No route for ${path}`);
     } catch (error) {
-      return errorResponse(500, "internal_error", error && error.message ? error.message : String(error));
+      console.error("Unhandled worker error", error);
+      return errorResponse(500, "internal_error", "Internal error while processing the request.");
     }
   },
 };
@@ -465,7 +466,7 @@ async function callUnlimitedJson(request, env, path, payload) {
   });
 
   if (!response.ok) {
-    throw new Error(`upstream ${path} failed: ${response.status} ${await response.text()}`);
+    throw await upstreamError(path, response);
   }
 
   return response.json();
@@ -479,10 +480,23 @@ async function callUnlimitedStream(request, env, path, payload) {
   });
 
   if (!response.ok) {
-    throw new Error(`upstream ${path} failed: ${response.status} ${await response.text()}`);
+    throw await upstreamError(path, response);
   }
 
   return response;
+}
+
+async function upstreamError(path, response) {
+  let detail = "";
+  try {
+    detail = await response.text();
+  } catch (_) {
+    detail = "";
+  }
+  console.error(`Upstream ${path} failed: ${response.status}`, detail);
+  const error = new Error(`Upstream request failed with status ${response.status}.`);
+  error.status = response.status;
+  return error;
 }
 
 async function collectUnlimitedText(request, env, path, payload) {
@@ -879,8 +893,23 @@ function upstreamBase(env) {
 
 function normalizePath(path) {
   if (!path || path === "") return "/";
-  const normalized = path.replace(/\/+/g, "/");
-  return normalized.length > 1 ? normalized.replace(/\/+$/, "") : normalized;
+  const collapsed = path.replace(/\/+/g, "/");
+  const resolved = resolveDotSegments(collapsed);
+  return resolved.length > 1 ? resolved.replace(/\/+$/, "") : resolved;
+}
+
+function resolveDotSegments(path) {
+  const leadingSlash = path.startsWith("/");
+  const output = [];
+  for (const segment of path.split("/")) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") {
+      output.pop();
+      continue;
+    }
+    output.push(segment);
+  }
+  return (leadingSlash ? "/" : "") + output.join("/");
 }
 
 function messagesToText(messages) {
