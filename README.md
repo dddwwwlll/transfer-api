@@ -63,7 +63,7 @@ npm install && npx wrangler deploy
 UNLIMITED_SURF_API_KEY=<你的 unlimited.surf key>
 ```
 
-推荐再添加一个客户端访问 key，用来保护你的 Worker：
+必须再添加一个客户端访问 key，用来保护共享的上游 key：
 
 ```text
 WORKER_API_KEY=<你自定义的调用密钥>
@@ -77,7 +77,7 @@ Workers & Pages -> 你的 Worker -> Settings -> Variables -> Secrets
 
 请只把 key 放到 Secret 里，不要写进 `wrangler.toml`、`README.md` 或任何 GitHub 文件。
 
-如果设置了 `WORKER_API_KEY`，客户端调用 Worker 时必须传这个 key。如果没有设置 `WORKER_API_KEY`，Worker 会保持兼容模式，客户端传任意 key 都可以，真正请求上游时使用 `UNLIMITED_SURF_API_KEY`。
+如果配置了 `UNLIMITED_SURF_API_KEY`，也必须配置 `WORKER_API_KEY`；否则 Worker 会返回 `503`，避免变成任何人都能消耗你的上游额度的公开中转。只有在没有配置共享上游 key 时，客户端才能直接传自己的 unlimited.surf key。
 
 ### 5. 部署后验证
 
@@ -124,7 +124,7 @@ wrangler deploy
 
 `UNLIMITED_SURF_API_KEY` 填 unlimited.surf 的真实 key。`WORKER_API_KEY` 填你自定义给客户端使用的 key。
 
-`WORKER_API_KEY` 是可选的：如果不设置，客户端可以传任意 key；如果设置了，客户端必须传这个 key。也可以不配置 `UNLIMITED_SURF_API_KEY`，改为每次请求直接传 unlimited.surf key，但不推荐这样做。
+使用共享的 `UNLIMITED_SURF_API_KEY` 时，`WORKER_API_KEY` 是必需的。也可以不配置 `UNLIMITED_SURF_API_KEY`，改为每次请求直接传客户端自己的 unlimited.surf key。
 
 ## 调用时使用哪个 key
 
@@ -152,10 +152,11 @@ curl https://<your-worker>.workers.dev/v1/chat/completions \
   Worker 使用 UNLIMITED_SURF_API_KEY 请求 unlimited.surf
 
 没有设置 WORKER_API_KEY:
-  客户端传任意 key 都可以
-  Worker 优先使用 UNLIMITED_SURF_API_KEY 请求 unlimited.surf
-  如果也没有 UNLIMITED_SURF_API_KEY，则把客户端传入的 key 当作 unlimited.surf key
+  不允许配置共享的 UNLIMITED_SURF_API_KEY
+  Worker 把客户端传入的 key 当作 unlimited.surf key
 ```
+
+如确实需要恢复旧版公开中转行为，可以显式设置 `ALLOW_UNAUTHENTICATED = "true"`。这会允许任何人消耗共享上游 key，不建议在公网使用。
 
 ## OpenAI 兼容接口
 
@@ -288,7 +289,7 @@ Add the upstream key in the Worker settings:
 UNLIMITED_SURF_API_KEY=<your unlimited.surf key>
 ```
 
-Recommended: add a client-facing key to protect the Worker:
+Required: add a client-facing key to protect the shared upstream key:
 
 ```text
 WORKER_API_KEY=<your custom client key>
@@ -302,7 +303,7 @@ Workers & Pages -> your Worker -> Settings -> Variables -> Secrets
 
 Keep keys in Secrets only. Do not put them in `wrangler.toml`, `README.md`, or GitHub files.
 
-If `WORKER_API_KEY` is set, clients must send that key when calling the Worker. If `WORKER_API_KEY` is not set, the Worker keeps compatibility mode and accepts any client key while using `UNLIMITED_SURF_API_KEY` for upstream requests.
+If `UNLIMITED_SURF_API_KEY` is configured, `WORKER_API_KEY` must also be configured. Otherwise the Worker returns `503` instead of becoming a public relay that lets anyone spend the shared upstream quota. Clients may pass their own unlimited.surf key only when no shared upstream key is configured.
 
 ### 5. Verify the deployment
 
@@ -349,7 +350,7 @@ wrangler deploy
 
 Use your real unlimited.surf key for `UNLIMITED_SURF_API_KEY`. Use your own client-facing key for `WORKER_API_KEY`.
 
-`WORKER_API_KEY` is optional. If it is not set, clients may send any key. If it is set, clients must send this exact key. You can also skip `UNLIMITED_SURF_API_KEY` and pass the real unlimited.surf key on every request, but that is not recommended.
+`WORKER_API_KEY` is required when using a shared `UNLIMITED_SURF_API_KEY`. Alternatively, omit `UNLIMITED_SURF_API_KEY` and have each client pass its own unlimited.surf key.
 
 ## Which key should clients use?
 
@@ -377,10 +378,11 @@ WORKER_API_KEY is set:
   Worker uses UNLIMITED_SURF_API_KEY for unlimited.surf
 
 WORKER_API_KEY is not set:
-  clients may send any key
-  Worker prefers UNLIMITED_SURF_API_KEY for unlimited.surf
-  if UNLIMITED_SURF_API_KEY is also missing, the client key is treated as the unlimited.surf key
+  a shared UNLIMITED_SURF_API_KEY must not be configured
+  the client key is treated as the unlimited.surf key
 ```
+
+To restore the legacy public-relay behavior explicitly, set `ALLOW_UNAUTHENTICATED = "true"`. This lets anyone spend the shared upstream key and is not recommended for public deployments.
 
 ## OpenAI-compatible routes
 
