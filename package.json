@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "check": "node --check src/worker.js",
+    "test": "node --test",
+    "test:coverage": "node --test --experimental-test-coverage",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy"
   },
