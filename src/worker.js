@@ -442,10 +442,7 @@ function responsesToChatBody(body, fallbackModel) {
 
 async function proxyUpstream(request, env, path) {
   const upstreamUrl = new URL(path + new URL(request.url).search, upstreamBase(env));
-  const headers = new Headers(request.headers);
-  const key = optionalUpstreamApiKey(request, env);
-  if (key) headers.set("authorization", `Bearer ${key}`);
-  headers.delete("host");
+  const headers = upstreamProxyHeaders(request, env);
 
   const init = {
     method: request.method,
@@ -466,7 +463,7 @@ async function callUnlimitedJson(request, env, path, payload) {
   });
 
   if (!response.ok) {
-    throw await upstreamError(path, response);
+    throw upstreamError(path, response);
   }
 
   return response.json();
@@ -480,23 +477,15 @@ async function callUnlimitedStream(request, env, path, payload) {
   });
 
   if (!response.ok) {
-    throw await upstreamError(path, response);
+    throw upstreamError(path, response);
   }
 
   return response;
 }
 
-async function upstreamError(path, response) {
-  let detail = "";
-  try {
-    detail = await response.text();
-  } catch (_) {
-    detail = "";
-  }
-  console.error(`Upstream ${path} failed: ${response.status}`, detail);
-  const error = new Error(`Upstream request failed with status ${response.status}.`);
-  error.status = response.status;
-  return error;
+function upstreamError(path, response) {
+  console.error(`Upstream ${path} failed: ${response.status}`);
+  return new Error(`Upstream request failed with status ${response.status}.`);
 }
 
 async function collectUnlimitedText(request, env, path, payload) {
@@ -843,7 +832,7 @@ function upstreamApiKey(request, env) {
 }
 
 function optionalUpstreamApiKey(request, env) {
-  const configured = env.UNLIMITED_SURF_API_KEY || env.API_KEY || env.AUTH_KEY;
+  const configured = configuredUpstreamApiKey(env);
   if (configured) return configured;
 
   if (env.WORKER_API_KEY) return "";
@@ -853,7 +842,16 @@ function optionalUpstreamApiKey(request, env) {
 
 function validateWorkerApiKey(request, env) {
   const expected = env.WORKER_API_KEY;
-  if (!expected) return null;
+  if (!expected) {
+    if (configuredUpstreamApiKey(env) && !enabled(env.ALLOW_UNAUTHENTICATED)) {
+      return errorResponse(
+        503,
+        "worker_api_key_required",
+        "WORKER_API_KEY must be configured when the Worker uses a shared upstream API key.",
+      );
+    }
+    return null;
+  }
 
   const actual = clientApiKey(request);
   if (actual && constantTimeEqual(actual, expected)) return null;
@@ -865,6 +863,25 @@ function validateWorkerApiKey(request, env) {
       code: "invalid_api_key",
     },
   }, { status: 401, headers: { "WWW-Authenticate": "Bearer" } });
+}
+
+function configuredUpstreamApiKey(env) {
+  return env.UNLIMITED_SURF_API_KEY || env.API_KEY || env.AUTH_KEY || "";
+}
+
+function enabled(value) {
+  return String(value || "").toLowerCase() === "true";
+}
+
+function upstreamProxyHeaders(request, env) {
+  const headers = new Headers();
+  for (const name of ["accept", "content-type", "anthropic-version", "anthropic-beta", "openai-beta"]) {
+    const value = request.headers.get(name);
+    if (value) headers.set(name, value);
+  }
+  const key = optionalUpstreamApiKey(request, env);
+  if (key) headers.set("authorization", `Bearer ${key}`);
+  return headers;
 }
 
 function clientApiKey(request) {
@@ -893,23 +910,8 @@ function upstreamBase(env) {
 
 function normalizePath(path) {
   if (!path || path === "") return "/";
-  const collapsed = path.replace(/\/+/g, "/");
-  const resolved = resolveDotSegments(collapsed);
-  return resolved.length > 1 ? resolved.replace(/\/+$/, "") : resolved;
-}
-
-function resolveDotSegments(path) {
-  const leadingSlash = path.startsWith("/");
-  const output = [];
-  for (const segment of path.split("/")) {
-    if (segment === "" || segment === ".") continue;
-    if (segment === "..") {
-      output.pop();
-      continue;
-    }
-    output.push(segment);
-  }
-  return (leadingSlash ? "/" : "") + output.join("/");
+  const normalized = path.replace(/\/+/g, "/");
+  return normalized.length > 1 ? normalized.replace(/\/+$/, "") : normalized;
 }
 
 function messagesToText(messages) {

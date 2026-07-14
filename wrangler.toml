@@ -7,12 +7,13 @@ compatibility_date = "2025-11-21"
 #
 # Optional: protect this Worker with your own client-facing key:
 #   wrangler secret put WORKER_API_KEY
-# When WORKER_API_KEY is set, clients must send it as Authorization: Bearer <key>,
-# x-api-key: <key>, or anthropic-api-key: <key>. If it is not set, the Worker
-# keeps the old behavior and accepts any client key.
+# When a shared UNLIMITED_SURF_API_KEY is set, WORKER_API_KEY is required so the
+# Worker cannot become a public relay. Clients send it as Authorization:
+# Bearer <key>, x-api-key: <key>, or anthropic-api-key: <key>.
 #
-# Clients can also send their own key as Authorization: Bearer <key>
-# or x-api-key: <key>; the Worker forwards it upstream when no secret is set.
+# Without a shared upstream key, clients can send their own unlimited.surf key.
+# To explicitly restore the unsafe legacy public-relay behavior, set
+# ALLOW_UNAUTHENTICATED = "true".
 
 [vars]
 UPSTREAM_BASE_URL = "https://unlimited.surf"
