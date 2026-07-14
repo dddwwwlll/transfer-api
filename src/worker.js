@@ -27,7 +27,7 @@ export default {
       }
 
       if (path.startsWith("/api/")) {
-        return proxyUpstream(request, env, path);
+        return await proxyUpstream(request, env, path);
       }
 
       if (path === "/mcp" || path === "/v1/mcp" || path === "/anthropic/mcp" || path === "/anthropic/v1/mcp") {
@@ -43,19 +43,35 @@ export default {
       }
 
       if (path === "/v1/messages" || (path === "/v1/models" && looksLikeAnthropicRequest(request)) || path.startsWith("/anthropic/")) {
-        return handleAnthropic(request, env, path);
+        return await handleAnthropic(request, env, path);
       }
 
       if (path.startsWith("/v1/")) {
-        return handleOpenAI(request, env, path);
+        return await handleOpenAI(request, env, path);
       }
 
       return errorResponse(404, "not_found", `No route for ${path}`);
     } catch (error) {
+      if (error instanceof ApiError) {
+        return errorResponse(error.status, error.code, error.message);
+      }
       return errorResponse(500, "internal_error", error && error.message ? error.message : String(error));
     }
   },
 };
+
+class ApiError extends Error {
+  constructor(status, code, message) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+function upstreamErrorStatus(status) {
+  return status >= 400 && status < 500 ? status : 502;
+}
 
 async function handleOpenAI(request, env, path) {
   if ((path === "/v1/key" || path === "/v1/auth-key" || path === "/v1/usage") && request.method === "GET") {
@@ -465,7 +481,7 @@ async function callUnlimitedJson(request, env, path, payload) {
   });
 
   if (!response.ok) {
-    throw new Error(`upstream ${path} failed: ${response.status} ${await response.text()}`);
+    throw new ApiError(upstreamErrorStatus(response.status), "upstream_error", `upstream ${path} failed: ${response.status} ${await safeReadText(response)}`);
   }
 
   return response.json();
@@ -479,7 +495,11 @@ async function callUnlimitedStream(request, env, path, payload) {
   });
 
   if (!response.ok) {
-    throw new Error(`upstream ${path} failed: ${response.status} ${await response.text()}`);
+    throw new ApiError(upstreamErrorStatus(response.status), "upstream_error", `upstream ${path} failed: ${response.status} ${await safeReadText(response)}`);
+  }
+
+  if (!response.body) {
+    throw new ApiError(502, "upstream_error", `upstream ${path} returned an empty response body`);
   }
 
   return response;
@@ -493,6 +513,10 @@ async function collectUnlimitedText(request, env, path, payload) {
   const annotations = [];
 
   for (const event of events) {
+    const eventError = extractStreamError(event);
+    if (eventError) {
+      throw new ApiError(502, "upstream_error", `upstream ${path} stream error: ${eventError}`);
+    }
     if (typeof event.delta === "string") text += event.delta;
     if (event.results) annotations.push(event.results);
     if (event.finish && event.reason) finishReason = event.reason;
@@ -516,7 +540,8 @@ async function getModelCatalog(request, env) {
       provider: model.provider || providerFromModel(model.id || model.name || ""),
       tier: model.tier || undefined,
     })).filter((model) => model.id);
-  } catch (_) {
+  } catch (error) {
+    console.error("getModelCatalog failed, serving fallback catalog:", error && error.message ? error.message : String(error));
     return fallbackModels();
   }
 }
@@ -686,6 +711,11 @@ function streamUnlimitedEvents(upstream, handlers) {
             const parsed = parseSseJson(line.slice(5).trim());
             if (!parsed) continue;
 
+            const parsedError = extractStreamError(parsed);
+            if (parsedError) {
+              throw new ApiError(502, "upstream_error", `upstream stream error: ${parsedError}`);
+            }
+
             if (typeof parsed.delta === "string" && parsed.delta.length) {
               handlers.delta && handlers.delta(controller, parsed.delta, parsed);
             }
@@ -699,7 +729,9 @@ function streamUnlimitedEvents(upstream, handlers) {
 
         if (!finished) handlers.finish && handlers.finish(controller, "stop", {});
       } catch (error) {
-        controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: error.message || String(error) })}\n\n`));
+        const message = error && error.message ? error.message : String(error);
+        const code = error instanceof ApiError ? error.code : "internal_error";
+        controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: { message, type: code, code } })}\n\n`));
       } finally {
         controller.close();
       }
@@ -805,8 +837,25 @@ async function readJson(request) {
   try {
     return JSON.parse(text);
   } catch (_) {
-    throw new Error("Request body must be valid JSON.");
+    throw new ApiError(400, "invalid_request_error", "Request body must be valid JSON.");
   }
+}
+
+async function safeReadText(response) {
+  try {
+    return (await response.text()) || "";
+  } catch (_) {
+    return "";
+  }
+}
+
+function extractStreamError(event) {
+  if (!event || typeof event !== "object") return "";
+  const raw = event.error;
+  if (!raw) return "";
+  if (typeof raw === "string") return raw;
+  if (typeof raw === "object") return raw.message || raw.type || JSON.stringify(raw);
+  return String(raw);
 }
 
 function upstreamHeaders(request, env, wantsStream) {
@@ -822,10 +871,10 @@ function upstreamApiKey(request, env) {
   if (key) return key;
 
   if (env.WORKER_API_KEY) {
-    throw new Error("Missing upstream API key. Set UNLIMITED_SURF_API_KEY when WORKER_API_KEY is enabled.");
+    throw new ApiError(500, "configuration_error", "Missing upstream API key. Set UNLIMITED_SURF_API_KEY when WORKER_API_KEY is enabled.");
   }
 
-  throw new Error("Missing upstream API key. Set UNLIMITED_SURF_API_KEY or pass Authorization: Bearer <key> / x-api-key: <key>.");
+  throw new ApiError(401, "authentication_error", "Missing upstream API key. Set UNLIMITED_SURF_API_KEY or pass Authorization: Bearer <key> / x-api-key: <key>.");
 }
 
 function optionalUpstreamApiKey(request, env) {
