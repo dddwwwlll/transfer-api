@@ -127,21 +127,13 @@ async function openAIDirectCapability(request, env, body, route) {
   }
 
   const result = await collectUnlimitedText(request, env, route, payload);
-  return jsonResponse({
+  return chatCompletionResponse({
     id,
-    object: "chat.completion",
     created,
     model,
-    choices: [
-      {
-        index: 0,
-        message: { role: "assistant", content: result.text },
-        logprobs: null,
-        finish_reason: result.finishReason || "stop",
-      },
-    ],
-    usage: usageFromText(payload.message || payload.query || "", result.text),
-    system_fingerprint: `unlimited-surf-worker:${route}`,
+    result,
+    usageInput: payload.message || payload.query || "",
+    systemFingerprint: `unlimited-surf-worker:${route}`,
   });
 }
 
@@ -158,6 +150,17 @@ async function openAIChatCompletions(request, env, body) {
   }
 
   const result = await collectUnlimitedText(request, env, route, payload);
+  return chatCompletionResponse({
+    id,
+    created,
+    model,
+    result,
+    usageInput: payload.message || "",
+    systemFingerprint: "unlimited-surf-worker",
+  });
+}
+
+function chatCompletionResponse({ id, created, model, result, usageInput, systemFingerprint }) {
   return jsonResponse({
     id,
     object: "chat.completion",
@@ -171,8 +174,8 @@ async function openAIChatCompletions(request, env, body) {
         finish_reason: result.finishReason || "stop",
       },
     ],
-    usage: usageFromText(payload.message || "", result.text),
-    system_fingerprint: "unlimited-surf-worker",
+    usage: usageFromText(usageInput, result.text),
+    system_fingerprint: systemFingerprint,
   });
 }
 
@@ -273,15 +276,11 @@ async function anthropicDirectCapability(request, env, body, route) {
   }
 
   const result = await collectUnlimitedText(request, env, route, payload);
-  return jsonResponse({
+  return anthropicMessageResponse({
     id,
-    type: "message",
-    role: "assistant",
     model: requestedModel,
-    content: [{ type: "text", text: result.text }],
-    stop_reason: anthropicStopReason(result.finishReason),
-    stop_sequence: null,
-    usage: anthropicUsageFromText(payload.message || payload.query || "", result.text),
+    result,
+    usageInput: payload.message || payload.query || "",
   });
 }
 
@@ -297,15 +296,24 @@ async function anthropicMessages(request, env, body) {
   }
 
   const result = await collectUnlimitedText(request, env, route, payload);
+  return anthropicMessageResponse({
+    id,
+    model: requestedModel,
+    result,
+    usageInput: payload.message || "",
+  });
+}
+
+function anthropicMessageResponse({ id, model, result, usageInput }) {
   return jsonResponse({
     id,
     type: "message",
     role: "assistant",
-    model: requestedModel,
+    model,
     content: [{ type: "text", text: result.text }],
     stop_reason: anthropicStopReason(result.finishReason),
     stop_sequence: null,
-    usage: anthropicUsageFromText(payload.message || "", result.text),
+    usage: anthropicUsageFromText(usageInput, result.text),
   });
 }
 
@@ -380,44 +388,30 @@ function chooseUnlimitedRoute(body) {
 }
 
 function buildUnlimitedPayload(body, route) {
-  if (route === "/api/search") {
-    return {
-      query: body.query || latestUserText(body.messages) || inputToText(body.input) || body.prompt || "",
-      model: mapUpstreamModel(body.model),
-      effort: body.effort || reasoningEffort(body),
-    };
-  }
-
-  const message = body.message || messagesToText(body.messages) || inputToText(body.input) || body.prompt || "";
-  const payload = {
-    message,
-    model: mapUpstreamModel(body.model),
-    effort: body.effort || reasoningEffort(body),
-  };
-
-  if (route === "/api/merge") {
-    payload.models = Array.isArray(body.models) && body.models.length ? body.models.map(mapUpstreamModel) : undefined;
-  }
-
-  return payload;
+  const text = route === "/api/search"
+    ? (body.query || latestUserText(body.messages) || inputToText(body.input) || body.prompt || "")
+    : (body.message || messagesToText(body.messages) || inputToText(body.input) || body.prompt || "");
+  return unlimitedPayloadFrom(body, route, text);
 }
 
 function buildAnthropicUnlimitedPayload(body, route) {
-  if (route === "/api/search") {
-    return {
-      query: latestUserText(body.messages) || body.query || "",
-      model: mapUpstreamModel(body.model),
-      effort: body.effort || reasoningEffort(body),
-    };
-  }
+  const text = route === "/api/search"
+    ? (latestUserText(body.messages) || body.query || "")
+    : anthropicMessagesToText(body);
+  return unlimitedPayloadFrom(body, route, text);
+}
 
-  const prompt = anthropicMessagesToText(body);
-  const payload = {
-    message: prompt,
+function unlimitedPayloadFrom(body, route, text) {
+  const base = {
     model: mapUpstreamModel(body.model),
     effort: body.effort || reasoningEffort(body),
   };
 
+  if (route === "/api/search") {
+    return { query: text, ...base };
+  }
+
+  const payload = { message: text, ...base };
   if (route === "/api/merge") {
     payload.models = Array.isArray(body.models) && body.models.length ? body.models.map(mapUpstreamModel) : undefined;
   }
@@ -457,24 +451,10 @@ async function proxyUpstream(request, env, path) {
   return addCors(response);
 }
 
-async function callUnlimitedJson(request, env, path, payload) {
+async function postUnlimited(request, env, path, payload, wantsStream) {
   const response = await fetch(new URL(path, upstreamBase(env)), {
     method: "POST",
-    headers: upstreamHeaders(request, env, false),
-    body: JSON.stringify(payload || {}),
-  });
-
-  if (!response.ok) {
-    throw new Error(`upstream ${path} failed: ${response.status} ${await response.text()}`);
-  }
-
-  return response.json();
-}
-
-async function callUnlimitedStream(request, env, path, payload) {
-  const response = await fetch(new URL(path, upstreamBase(env)), {
-    method: "POST",
-    headers: upstreamHeaders(request, env, true),
+    headers: upstreamHeaders(request, env, wantsStream),
     body: JSON.stringify(payload || {}),
   });
 
@@ -483,6 +463,15 @@ async function callUnlimitedStream(request, env, path, payload) {
   }
 
   return response;
+}
+
+async function callUnlimitedJson(request, env, path, payload) {
+  const response = await postUnlimited(request, env, path, payload, false);
+  return response.json();
+}
+
+function callUnlimitedStream(request, env, path, payload) {
+  return postUnlimited(request, env, path, payload, true);
 }
 
 async function collectUnlimitedText(request, env, path, payload) {
@@ -678,14 +667,10 @@ function streamUnlimitedEvents(upstream, handlers) {
           const { done, value } = await reader.read();
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split(/\r?\n/);
-          buffer = lines.pop() || "";
+          const { events, rest } = parseSseChunk(buffer);
+          buffer = rest;
 
-          for (const line of lines) {
-            if (!line.startsWith("data:")) continue;
-            const parsed = parseSseJson(line.slice(5).trim());
-            if (!parsed) continue;
-
+          for (const parsed of events) {
             if (typeof parsed.delta === "string" && parsed.delta.length) {
               handlers.delta && handlers.delta(controller, parsed.delta, parsed);
             }
@@ -717,13 +702,9 @@ async function readUnlimitedEvents(response) {
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() || "";
-    for (const line of lines) {
-      if (!line.startsWith("data:")) continue;
-      const parsed = parseSseJson(line.slice(5).trim());
-      if (parsed) events.push(parsed);
-    }
+    const { events: chunkEvents, rest } = parseSseChunk(buffer);
+    events.push(...chunkEvents);
+    buffer = rest;
   }
 
   if (buffer.startsWith("data:")) {
@@ -732,6 +713,18 @@ async function readUnlimitedEvents(response) {
   }
 
   return events;
+}
+
+function parseSseChunk(buffer) {
+  const lines = buffer.split(/\r?\n/);
+  const rest = lines.pop() || "";
+  const events = [];
+  for (const line of lines) {
+    if (!line.startsWith("data:")) continue;
+    const parsed = parseSseJson(line.slice(5).trim());
+    if (parsed) events.push(parsed);
+  }
+  return { events, rest };
 }
 
 function writeSse(controller, data) {
@@ -1072,8 +1065,12 @@ function looksLikeAnthropicRequest(request) {
   return request.headers.has("anthropic-version") || request.headers.has("anthropic-beta") || request.headers.has("x-api-key");
 }
 
+function getOrigin(request) {
+  return new URL(request.url).origin;
+}
+
 function serviceInfo(request, env) {
-  const origin = new URL(request.url).origin;
+  const origin = getOrigin(request);
   return {
     ok: true,
     service: "unlimited.surf OpenAI/Anthropic compatibility Worker",
@@ -1088,7 +1085,7 @@ function serviceInfo(request, env) {
 }
 
 function agentSetup(request) {
-  const origin = new URL(request.url).origin;
+  const origin = getOrigin(request);
   return `Claude Code / Anthropic-compatible setup
 
 PowerShell:
@@ -1119,7 +1116,7 @@ MCP tools run in the client/agent environment. Use this Worker as the model endp
 }
 
 function codexSetup(request) {
-  const origin = new URL(request.url).origin;
+  const origin = getOrigin(request);
   return `Codex custom provider notes
 
 OpenAI-compatible Chat Completions:
@@ -1144,7 +1141,7 @@ MCP execution remains client-side; configure MCP servers in Codex or your IDE, a
 }
 
 function mcpInfo(request) {
-  const origin = new URL(request.url).origin;
+  const origin = getOrigin(request);
   return {
     supported: true,
     model_endpoint: origin,
